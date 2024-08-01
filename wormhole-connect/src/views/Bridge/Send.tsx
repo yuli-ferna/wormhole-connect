@@ -80,6 +80,7 @@ const SquadAlert = ({ wallet }: { wallet: WalletData }) => (
 function Send(props: { valid: boolean }) {
   const { classes } = useStyles();
   const dispatch = useDispatch();
+  const [isMultisign, setMultisign] = useState(false);
   const transferInput = useSelector((state: RootState) => state.transferInput);
   const {
     showValidationState,
@@ -191,7 +192,11 @@ function Send(props: { valid: boolean }) {
         type: 'transfer.start',
         details: { ...transferDetails, txId },
       });
-
+      if (wallet.sending.name === 'SquadsX') {
+        setMultisign(true);
+        dispatch(setIsTransactionInProgress(false));
+        return;
+      }
       let message: UnsignedMessage | undefined;
       while (message === undefined) {
         try {
@@ -333,7 +338,7 @@ function Send(props: { valid: boolean }) {
           <Button
             onClick={send}
             action={props.valid}
-            disabled={disabled}
+            disabled={disabled || isMultisign}
             testId="approve-button"
             elevated
           >
