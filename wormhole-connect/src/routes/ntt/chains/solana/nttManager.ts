@@ -6,7 +6,12 @@ import {
 } from '@wormhole-foundation/wormhole-connect-sdk';
 import { InboundQueuedTransfer } from '../../types';
 import { solanaContext, toChainId, toChainName } from 'utils/sdk';
-import { TransferWallet, postVaa, signAndSendTransaction } from 'utils/wallet';
+import {
+  TransferWallet,
+  getWalletConnection,
+  postVaa,
+  signAndSendTransaction,
+} from 'utils/wallet';
 import {
   Connection,
   Keypair,
@@ -47,6 +52,7 @@ import {
   UnsupportedContractAbiVersion,
 } from 'routes/ntt/errors';
 import { abiVersionMatches } from 'routes/ntt/utils';
+import { Wallet } from '@xlabs-libs/wallet-aggregator-core';
 
 const RATE_LIMIT_DURATION = 24 * 60 * 60;
 
@@ -64,6 +70,33 @@ interface TransferArgs {
   shouldQueue: boolean;
 }
 
+const isSquads = (wallet: { getName: () => string }) =>
+  wallet?.getName() === 'SquadsX';
+
+const hasEphemeralSigners = (wallet: Wallet) =>
+  'adapter' in wallet &&
+  //@ts-ignore
+  'standard' in wallet.adapter &&
+  //@ts-ignore
+  'fuse:getEphemeralSigners' in wallet.adapter.wallet.features;
+
+async function getEphemeralSigner(
+  wallet: Wallet | undefined,
+): Promise<Keypair> {
+  if (wallet && isSquads(wallet) && hasEphemeralSigners(wallet)) {
+    // @ts-ignore
+    const signers =
+      // @ts-ignore
+      await wallet.adapter.wallet.features[
+        'fuse:getEphemeralSigners'
+      ].getEphemeralSigners(1);
+    return {
+      publicKey: new PublicKey(signers[0]),
+    } as Keypair;
+  }
+  return Keypair.generate();
+}
+
 export class NttManagerSolana {
   static readonly abiVersionCache = new Map<
     string,
@@ -72,6 +105,7 @@ export class NttManagerSolana {
 
   readonly connection: Connection;
   readonly wormholeId: string;
+  readonly isMultisignWallet: boolean;
 
   constructor(readonly nttId: string) {
     const { connection } = solanaContext();
@@ -80,6 +114,8 @@ export class NttManagerSolana {
     const core = CONFIG.wh.mustGetContracts('solana').core;
     if (!core) throw new Error('Core not found');
     this.wormholeId = core;
+    this.isMultisignWallet =
+      getWalletConnection(TransferWallet.SENDING)?.getName() === 'SquadsX';
   }
 
   async send(
@@ -92,12 +128,14 @@ export class NttManagerSolana {
   ): Promise<string> {
     const program = await this.getProgram();
     const config = await this.getConfig();
-    const outboxItem = Keypair.generate();
+    const wallet = getWalletConnection(TransferWallet.SENDING);
+    const outboxItem = await getEphemeralSigner(wallet);
     const destContext = CONFIG.wh.getContext(toChain);
     const payer = new PublicKey(sender);
     const tokenAccount = getAssociatedTokenAddressSync(
       new PublicKey(token.address),
       payer,
+      this.isMultisignWallet,
     );
     const txArgs = {
       payer,
@@ -157,7 +195,9 @@ export class NttManagerSolana {
     tx.recentBlockhash = blockhash;
     await this.simulate(tx);
     await addComputeBudget(this.connection, tx);
-    tx.partialSign(outboxItem);
+    if (wallet && !isSquads(wallet)) {
+      tx.partialSign(outboxItem);
+    }
     const txId = await signAndSendTransaction(
       'solana',
       tx,
